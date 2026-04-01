@@ -3,10 +3,6 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QFile, QTextStream
 from osdagbridge.desktop.resources import resources_rc
 
-# Import template_page
-from osdagbridge.desktop.ui.template_page import CustomWindow
-from osdagbridge.core.bridge_types.plate_girder.plategirderbridge import PlateGirderBridge
-
 # Create Intg_osdag.sqlite if not Exist
 def create_sqlite():
     import sqlite3
@@ -97,6 +93,10 @@ def create_sqlite():
                 temp_path.unlink()
 
 create_sqlite()
+
+# Import template_page
+from osdagbridge.desktop.ui.template_page import CustomWindow
+from osdagbridge.core.bridge_types.plate_girder.plategirderbridge import PlateGirderBridge
 
 def load_stylesheet():
     """Load the global QSS stylesheet from resources."""
