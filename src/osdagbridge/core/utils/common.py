@@ -1311,6 +1311,78 @@ DESIGN_CHECK_REMEDY = {
 }
 
 # ---------------------------------------------------------------------------
+# Deck slab check identities — the deck is designed against IRC 112:2020 rather
+# than the girder's IRC 22 categories, so it carries its own set of check keys.
+# ---------------------------------------------------------------------------
+KEY_DD_CHECK_FLEXURE          = "deck.flexure"
+KEY_DD_CHECK_SHEAR            = "deck.oneway_shear"
+KEY_DD_CHECK_PUNCHING         = "deck.punching_shear"
+KEY_DD_CHECK_STRESS_CONC      = "deck.sls_stress_concrete"
+KEY_DD_CHECK_STRESS_REINF     = "deck.sls_stress_reinforcement"
+KEY_DD_CHECK_CRACK            = "deck.crack_width"
+KEY_DD_CHECK_COMP_TRANS_SHEAR = "deck.composite_transverse_shear"
+KEY_DD_CHECK_COMP_CRACK       = "deck.composite_crack_control"
+
+DECK_CHECK_TITLES = {
+    KEY_DD_CHECK_FLEXURE:          "ULS Flexure",
+    KEY_DD_CHECK_SHEAR:            "One-Way Shear",
+    KEY_DD_CHECK_PUNCHING:         "Punching Shear",
+    KEY_DD_CHECK_STRESS_CONC:      "SLS Concrete Stress",
+    KEY_DD_CHECK_STRESS_REINF:     "SLS Reinforcement Stress",
+    KEY_DD_CHECK_CRACK:            "Crack Width",
+    KEY_DD_CHECK_COMP_TRANS_SHEAR: "Composite Transverse Shear",
+    KEY_DD_CHECK_COMP_CRACK:       "Composite Crack Control",
+}
+
+# What the user should change to make a failing deck check pass. The deck module
+# already adds reinforcement automatically wherever that helps, so these remedies
+# name the inputs it cannot change by itself: slab thickness, concrete grade and
+# the permitted bar-diameter bounds.
+DECK_CHECK_REMEDY = {
+    KEY_DD_CHECK_FLEXURE: (
+        "Increase the deck thickness, or raise the upper bar-diameter bound so a "
+        "larger reinforcement area can be provided."
+    ),
+    KEY_DD_CHECK_SHEAR: (
+        "Increase the deck thickness: v_Rd,c grows with the effective depth d, "
+        "and the reinforcement ratio rho_1 is capped at 0.02 so extra steel "
+        "cannot raise the capacity beyond that."
+    ),
+    KEY_DD_CHECK_PUNCHING: (
+        "Increase the deck thickness (deeper d and longer control perimeter u1), "
+        "or raise the concrete grade."
+    ),
+    KEY_DD_CHECK_STRESS_CONC: (
+        "Raise the concrete grade (the limit is 0.48 f_ck) or increase the deck "
+        "thickness."
+    ),
+    KEY_DD_CHECK_STRESS_REINF: (
+        "Increase the deck thickness, or raise the upper bar-diameter bound so "
+        "more tension steel can be provided (the limit is 0.80 f_y)."
+    ),
+    KEY_DD_CHECK_CRACK: (
+        "Use smaller bars at closer spacing for the same steel area, reduce the "
+        "clear cover, or raise the concrete grade."
+    ),
+    KEY_DD_CHECK_COMP_TRANS_SHEAR: (
+        "Increase the transverse reinforcement crossing the shear plane, the "
+        "deck thickness, or the concrete grade (IRC 22:2015 Cl.606.10)."
+    ),
+    KEY_DD_CHECK_COMP_CRACK: (
+        "Increase the top-mat reinforcement over the girder to meet the "
+        "IRC 22:2015 Cl.604.4 minimum area."
+    ),
+}
+
+# Appended to a remedy when the deck module could not add any more steel: the
+# largest permitted bar at the minimum spacing is already provided, so only the
+# slab geometry / material inputs can resolve the failure.
+DECK_BARS_MAXED_NOTE = (
+    "The reinforcement is already at the largest permitted bar and the minimum "
+    "spacing, so adding steel is no longer possible."
+)
+
+# ---------------------------------------------------------------------------
 # LaTeX equation strings — standalone fragment suitable for embedding inside
 # a \[ ... \] display-math block in a minimal article document.
 #

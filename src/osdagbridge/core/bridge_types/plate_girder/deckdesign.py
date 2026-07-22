@@ -55,6 +55,13 @@ from osdagbridge.core.utils.common import (
     # Composite interface check output keys — mutated into design_results.
     KEY_SD_TS_VL, KEY_SD_TS_VCAP_CONC, KEY_SD_TS_VCAP_REINF, KEY_SD_TS_VRD,
     KEY_SD_CRACK_AS_MIN, KEY_SD_CRACK_AS_PROV,
+    # Verdict — PASS/FAIL summary + remediation advice for the design logger
+    STATUS_PASS, STATUS_FAIL, COMPONENT_DECK,
+    KEY_DD_VERDICT, KEY_DD_OVERALL_STATUS,
+    KEY_DD_CHECK_FLEXURE, KEY_DD_CHECK_SHEAR, KEY_DD_CHECK_PUNCHING,
+    KEY_DD_CHECK_STRESS_CONC, KEY_DD_CHECK_STRESS_REINF, KEY_DD_CHECK_CRACK,
+    KEY_DD_CHECK_COMP_TRANS_SHEAR, KEY_DD_CHECK_COMP_CRACK,
+    DECK_CHECK_TITLES, DECK_CHECK_REMEDY, DECK_BARS_MAXED_NOTE,
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -406,6 +413,61 @@ def transverse_shear_check(VL_N_per_mm: float, fck_MPa: float, fy_rebar_MPa: flo
 
 
 # ── main design function ──────────────────────────────────────────────────────
+
+def _bars_maxed_out(dia_mm: float, spacing_mm: float, allowed_dias: list) -> bool:
+    """True when _pick_rebar can no longer add steel: largest permitted bar at
+    the minimum spacing. A failing check in that state can only be resolved by
+    changing the slab thickness / concrete grade / bar bounds, not by more steel."""
+    return bool(allowed_dias) and dia_mm >= allowed_dias[-1] and spacing_mm <= _SPACING_MIN_MM
+
+
+def build_deck_verdict(rows: list) -> dict:
+    """Condense the deck checks into a single PASS/FAIL verdict.
+
+    ``rows`` are the check records assembled at the end of design_deck_slab:
+    ``{"check", "location", "clause", "ur", "ok", "maxed"}``. A row fails on its
+    own ``ok`` flag — the same criterion the printed deck report uses — so the
+    logger and the report can never disagree.
+
+    One entry per check type: the worst-UR failing location (interior sagging /
+    hogging / overhang), so a slab failing crack width top and bottom logs once.
+
+    Returns a verdict dict as documented in common.py (KEY_DD_VERDICT).
+    """
+    worst: dict = {}
+    max_ur = 0.0
+
+    for row in rows:
+        ur = float(row["ur"])
+        max_ur = max(max_ur, ur)
+        if row["ok"]:
+            continue
+
+        key      = row["check"]
+        previous = worst.get(key)
+        if previous is not None and previous["ur"] >= ur:
+            continue
+
+        remedy = DECK_CHECK_REMEDY.get(key, "")
+        if row.get("maxed") and remedy:
+            remedy = f"{remedy} {DECK_BARS_MAXED_NOTE}"
+        worst[key] = {
+            "member": row["location"],
+            "check" : key,
+            "name"  : DECK_CHECK_TITLES.get(key, key),
+            "clause": row["clause"],
+            "ur"    : round(ur, 3),
+            "remedy": remedy,
+        }
+
+    failures = sorted(worst.values(), key=lambda f: f["ur"], reverse=True)
+    return {
+        "component": COMPONENT_DECK,
+        "status"   : STATUS_FAIL if failures else STATUS_PASS,
+        "max_ur"   : round(max_ur, 3),
+        "failures" : failures,
+    }
+
 
 def design_deck_slab(input_dict: dict, fck: float, fctm: float, fy: float, Es: float, Ecm: float,
                      *, design_results: dict | None = None,
@@ -855,6 +917,79 @@ def design_deck_slab(input_dict: dict, fck: float, fctm: float, fy: float, Es: f
         ur_composite_rebar_stress = _ur(dr.get("sigma_rebar_actual_MPa") or 0.0,
                                         dr.get("sigma_rebar_limit_MPa") or 0.0)
 
+    # ── 11b. PASS/FAIL verdict ───────────────────────────────────────────────
+    # One record per check performed above, reusing the same ok flags the report
+    # text prints. "maxed" marks a mat whose bars can no longer be increased, so
+    # the advice can say that adding steel is not an option any more.
+    bot_maxed = _bars_maxed_out(dia_bot, spc_bot, allowed_dias)
+    top_maxed = _bars_maxed_out(dia_top, spc_top, allowed_dias)
+
+    _CL112 = "IRC 112:2020"
+    deck_checks = [
+        {"check": KEY_DD_CHECK_FLEXURE,      "location": "Interior sagging",
+         "clause": _CL112,                  "ur": ur_bot_uls,   "ok": bot_ok,          "maxed": bot_maxed},
+        {"check": KEY_DD_CHECK_FLEXURE,      "location": "Interior hogging",
+         "clause": _CL112,                  "ur": ur_top_uls,   "ok": top_ok,          "maxed": top_maxed},
+        {"check": KEY_DD_CHECK_SHEAR,        "location": "Interior span",
+         "clause": f"{_CL112} Cl.10.3.2",   "ur": ur_bot_shear, "ok": shear_bot_ok,    "maxed": bot_maxed},
+        {"check": KEY_DD_CHECK_PUNCHING,     "location": "Interior span",
+         "clause": f"{_CL112} Cl.10.4",     "ur": ur_bot_punch, "ok": punch_bot_ok,    "maxed": bot_maxed},
+        {"check": KEY_DD_CHECK_STRESS_CONC,  "location": "Interior sagging",
+         "clause": f"{_CL112} Cl.12.2.1",   "ur": ur_bot_sls_c, "ok": sc_bot["sc_ok"], "maxed": bot_maxed},
+        {"check": KEY_DD_CHECK_STRESS_CONC,  "location": "Interior hogging",
+         "clause": f"{_CL112} Cl.12.2.1",   "ur": ur_top_sls_c, "ok": sc_top["sc_ok"], "maxed": top_maxed},
+        {"check": KEY_DD_CHECK_STRESS_REINF, "location": "Interior sagging",
+         "clause": f"{_CL112} Cl.12.2.1",   "ur": ur_bot_sls_s, "ok": sc_bot["ss_ok"], "maxed": bot_maxed},
+        {"check": KEY_DD_CHECK_STRESS_REINF, "location": "Interior hogging",
+         "clause": f"{_CL112} Cl.12.2.1",   "ur": ur_top_sls_s, "ok": sc_top["ss_ok"], "maxed": top_maxed},
+        {"check": KEY_DD_CHECK_CRACK,        "location": "Interior sagging",
+         "clause": f"{_CL112} Cl.12.3.4",   "ur": ur_bot_crack, "ok": cw_bot["ok"],    "maxed": bot_maxed},
+        {"check": KEY_DD_CHECK_CRACK,        "location": "Interior hogging",
+         "clause": f"{_CL112} Cl.12.3.4",   "ur": ur_top_crack, "ok": cw_top["ok"],    "maxed": top_maxed},
+    ]
+
+    if overhang_m > 0.01:
+        oh_maxed = _bars_maxed_out(dia_oh, spc_oh, allowed_dias)
+        deck_checks += [
+            {"check": KEY_DD_CHECK_FLEXURE,      "location": "Overhang",
+             "clause": _CL112,                  "ur": M_ULS_oh / Mu_oh if Mu_oh > 0 else 9.999,
+             "ok": oh_ok,          "maxed": oh_maxed},
+            {"check": KEY_DD_CHECK_SHEAR,        "location": "Overhang",
+             "clause": f"{_CL112} Cl.10.3.2",   "ur": ur_oh_shear, "ok": shear_oh_ok,    "maxed": oh_maxed},
+            {"check": KEY_DD_CHECK_PUNCHING,     "location": "Overhang",
+             "clause": f"{_CL112} Cl.10.4",     "ur": ur_oh_punch, "ok": punch_oh_ok,    "maxed": oh_maxed},
+            {"check": KEY_DD_CHECK_STRESS_CONC,  "location": "Overhang",
+             "clause": f"{_CL112} Cl.12.2.1",   "ur": sc_oh["sigma_c"] / sc_oh["sc_lim"],
+             "ok": sc_oh["sc_ok"], "maxed": oh_maxed},
+            {"check": KEY_DD_CHECK_STRESS_REINF, "location": "Overhang",
+             "clause": f"{_CL112} Cl.12.2.1",   "ur": sc_oh["sigma_s"] / sc_oh["ss_lim"],
+             "ok": sc_oh["ss_ok"], "maxed": oh_maxed},
+            {"check": KEY_DD_CHECK_CRACK,        "location": "Overhang",
+             "clause": f"{_CL112} Cl.12.3.4",   "ur": cw_oh["wk"] / cw_oh["wk_lim"],
+             "ok": cw_oh["ok"],    "maxed": oh_maxed},
+        ]
+
+    if has_composite:
+        # Composite interface: the concrete / rebar SLS stresses live here rather
+        # than in the girder verdict — DCREngine.CATEGORY_MAP deliberately leaves
+        # check_ids 10, 12, 15, 16 and 17 to the deck design.
+        deck_checks += [
+            {"check": KEY_DD_CHECK_COMP_TRANS_SHEAR, "location": "Steel-concrete interface",
+             "clause": "IRC 22:2015 Cl.606.10", "ur": ur_composite_trans_shear,
+             "ok": ts["check_ok"], "maxed": bot_maxed and top_maxed},
+            {"check": KEY_DD_CHECK_COMP_CRACK,       "location": "Over girder (top mat)",
+             "clause": "IRC 22:2015 Cl.604.4",  "ur": ur_composite_crack,
+             "ok": ur_composite_crack <= 1.0, "maxed": top_maxed},
+            {"check": KEY_DD_CHECK_STRESS_CONC,      "location": "Composite slab",
+             "clause": "IRC 22:2015 Cl.604.3.1", "ur": ur_composite_conc_stress,
+             "ok": ur_composite_conc_stress <= 1.0, "maxed": top_maxed},
+            {"check": KEY_DD_CHECK_STRESS_REINF,     "location": "Composite slab",
+             "clause": "IRC 22:2015 Cl.604.3.1", "ur": ur_composite_rebar_stress,
+             "ok": ur_composite_rebar_stress <= 1.0, "maxed": top_maxed},
+        ]
+
+    deck_verdict = build_deck_verdict(deck_checks)
+
     sls_lines = [
         "",
         "=" * 52,
@@ -1009,6 +1144,9 @@ def design_deck_slab(input_dict: dict, fck: float, fctm: float, fy: float, Es: f
         "ur_bot_punch"           : round(ur_bot_punch, 3),
         # ── design check report text ────────────────────────────────────────
         "deck_design_check"      : design_check_text,
+        # ── PASS/FAIL verdict + remediation advice (logged by PlateGirderBridge)
+        KEY_DD_VERDICT           : deck_verdict,
+        KEY_DD_OVERALL_STATUS    : deck_verdict["status"],
     }
     if overhang_m > 0.01:
         result.update({

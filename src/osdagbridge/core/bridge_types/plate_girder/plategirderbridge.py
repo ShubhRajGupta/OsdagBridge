@@ -260,6 +260,7 @@ from osdagbridge.core.utils.common import (
 
     STATUS_PASS, STATUS_FAIL,
     KEY_SD_VERDICT, KEY_SD_OVERALL_STATUS,
+    KEY_DD_VERDICT, KEY_DD_OVERALL_STATUS,
 )
 
 from osdagbridge.core.bridge_types.plate_girder.initial_sizing import (
@@ -3253,6 +3254,13 @@ class PlateGirderBridge:
         if result.get("deck_design_check"):
             print(result["deck_design_check"])
         print(sep)
+
+        # Deck PASS/FAIL verdict — built by deckdesign, logged here so that
+        # module stays free of logger imports (same split as the girder stage).
+        verdict = result.get(KEY_DD_VERDICT) or {}
+        self.output_dict[KEY_DD_VERDICT]        = verdict
+        self.output_dict[KEY_DD_OVERALL_STATUS] = verdict.get("status", STATUS_FAIL)
+        log_design_verdict(verdict)
 
         return result
 
