@@ -257,6 +257,9 @@ from osdagbridge.core.utils.common import (
     KEY_TD_ED_BOTTOM_CHORD_PROP_L, KEY_TD_ED_BOTTOM_CHORD_PROP_H, KEY_TD_ED_BOTTOM_CHORD_PROP_B, KEY_TD_ED_BOTTOM_CHORD_PROP_TW, KEY_TD_ED_BOTTOM_CHORD_PROP_TF,
     KEY_TD_ED_BOTTOM_CHORD_PROP_RZ, KEY_TD_ED_BOTTOM_CHORD_PROP_M, KEY_TD_ED_BOTTOM_CHORD_PROP_A, KEY_TD_ED_BOTTOM_CHORD_PROP_IZ, KEY_TD_ED_BOTTOM_CHORD_PROP_IV,
     KEY_TD_ED_BOTTOM_CHORD_PROP_RV, KEY_TD_ED_BOTTOM_CHORD_PROP_ZZ, KEY_TD_ED_BOTTOM_CHORD_PROP_ZV, KEY_TD_ED_BOTTOM_CHORD_PROP_ZUZ, KEY_TD_ED_BOTTOM_CHORD_PROP_ZUV,
+
+    STATUS_PASS, STATUS_FAIL,
+    KEY_SD_VERDICT, KEY_SD_OVERALL_STATUS,
 )
 
 from osdagbridge.core.bridge_types.plate_girder.initial_sizing import (
@@ -312,6 +315,44 @@ def resolve_girder_value(source: dict, base_key: str, i: int | None = None):
         if key in source:
             return source[key]
     raise KeyError(base_key)
+
+
+def log_design_verdict(verdict: dict) -> None:
+    """Emit one component's PASS/FAIL verdict to the design logger.
+
+    On PASS a single green line is written. On FAIL every failing check is
+    listed with its member, clause and utilisation ratio, each followed by the
+    remediation advice telling the user what to change to make it pass.
+
+    ``verdict`` is the dict documented in common.py (see KEY_SD_VERDICT); it is
+    built by the design module that ran the checks — designer.build_girder_verdict
+    for girders, and the equivalents for the deck and transverse members.
+    """
+    if not verdict:
+        return
+
+    component = verdict.get("component", "")
+    status    = verdict.get("status", STATUS_FAIL)
+    max_ur    = verdict.get("max_ur")
+    detail    = f"max UR = {max_ur:.3f}" if isinstance(max_ur, (int, float)) else ""
+
+    bridge_logger.verdict(component, status, detail)
+    if status == STATUS_PASS:
+        return
+
+    for failure in verdict.get("failures") or []:
+        label = failure.get("name") or failure.get("check", "")
+        if failure.get("member"):
+            label = f"{failure['member']} : {label}"
+        if failure.get("clause"):
+            label += f" [{failure['clause']}]"
+
+        ur = failure.get("ur")
+        bridge_logger.check_failed(
+            label, f"UR = {ur:.3f}" if isinstance(ur, (int, float)) else ""
+        )
+        if failure.get("remedy"):
+            bridge_logger.suggestion(failure["remedy"])
 
 
 class PlateGirderBridge:
@@ -2307,6 +2348,13 @@ class PlateGirderBridge:
         # store_design_results also sets the KEY_UTIL_* values so the block
         # below is redundant — but kept for the _frontend.set_output_value calls.
         self.store_design_results(design_results)
+
+        # Girder PASS/FAIL verdict — logged here rather than inside
+        # run_design_check so the design module stays free of logger imports.
+        verdict = design_results.get(KEY_SD_VERDICT) or {}
+        self.output_dict[KEY_SD_VERDICT]        = verdict
+        self.output_dict[KEY_SD_OVERALL_STATUS] = verdict.get("status", STATUS_FAIL)
+        log_design_verdict(verdict)
 
     def _design_cross_bracing_members(self) -> dict:
         """

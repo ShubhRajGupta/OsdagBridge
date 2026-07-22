@@ -91,6 +91,24 @@ class BridgeLogger:
     def error(self, message: str) -> None:
         self._emit(f"[{self._ts()}]   ERROR : {message}", "error")
 
+    def verdict(self, component: str, status: str, detail: str = "") -> None:
+        """Headline PASS/FAIL line for one component (girder / deck / transverse)."""
+        line = f"{component.upper()} : {status}"
+        if detail:
+            line += f"  ({detail})"
+        self._emit(f"[{self._ts()}]   {line}", "success" if status == "PASS" else "error")
+
+    def check_failed(self, label: str, detail: str = "") -> None:
+        """One failing design check, listed under a FAIL verdict."""
+        line = f"  FAIL : {label}"
+        if detail:
+            line += f"  |  {detail}"
+        self._emit(f"[{self._ts()}]   {line}", "error")
+
+    def suggestion(self, message: str) -> None:
+        """Remediation advice for the failure logged immediately above."""
+        self._emit(f"[{self._ts()}]       -> {message}", "warning")
+
     def get_success_log(self) -> List[str]:
         """Return the green (success) log lines captured during the last run."""
         return list(self._success_log)

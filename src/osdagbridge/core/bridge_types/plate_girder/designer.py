@@ -3209,6 +3209,55 @@ def _build_uls_per_girder(per_girder_results: dict) -> dict:
     return result
 
 
+def build_girder_verdict(per_girder_results: dict) -> dict:
+    """Condense every girder's DCR checks into one PASS/FAIL verdict.
+
+    Only FAIL rows are reported — a check in the WARN band (DCR_PASS_THRESHOLD ≤
+    DCR < DCR_FAIL_THRESHOLD) is still a pass. Stiffener checks (check_ids 20/21)
+    are outside CATEGORY_MAP and, as everywhere else in the engine, outside the
+    verdict too.
+
+    One entry per design category: the worst-DCR failing check across all
+    girders, so a bridge with N girders failing the same way logs one line, not N.
+
+    Returns a verdict dict as documented in common.py (KEY_SD_VERDICT).
+    """
+    worst: Dict[str, dict] = {}
+    max_ur = 0.0
+
+    for g_name, g_data in per_girder_results.items():
+        if str(g_name).startswith("EB"):          # edge beams are not designed girders
+            continue
+        for chk in g_data.get("checks") or []:
+            category = DCREngine.CATEGORY_MAP.get(chk["check_id"])
+            if category is None:
+                continue
+            cat_key = DESIGN_CHECK_CATEGORY_KEYS[category[0]]
+            dcr = float(chk["dcr"])
+            max_ur = max(max_ur, dcr)
+
+            if chk["status"] != "FAIL":
+                continue
+            previous = worst.get(cat_key)
+            if previous is None or dcr > previous["ur"]:
+                worst[cat_key] = {
+                    "member": g_name,
+                    "check" : cat_key,
+                    "name"  : chk["name"],
+                    "clause": chk["clause"],
+                    "ur"    : round(dcr, 3),
+                    "remedy": DESIGN_CHECK_REMEDY.get(cat_key, ""),
+                }
+
+    failures = sorted(worst.values(), key=lambda f: f["ur"], reverse=True)
+    return {
+        "component": COMPONENT_GIRDER,
+        "status"   : STATUS_FAIL if failures else STATUS_PASS,
+        "max_ur"   : round(max_ur, 3),
+        "failures" : failures,
+    }
+
+
 def run_design_check(
     config: "BridgeConfig | None" = None,
     plate_girder_bridge: Any | None = None,
@@ -3362,6 +3411,10 @@ def run_design_check(
         g.pop("_engine", None)
         g.pop("_capacity", None)
     print(f"\n  Controlling girder: {ctrl_name}  (max_DCR = {ctrl['max_dcr']:.3f})")
+
+    # Verdict across ALL girders — not just the controlling one, so a girder that
+    # fails a category the controlling girder passes is still reported.
+    girder_verdict = build_girder_verdict(per_girder_results)
 
     # -- Step 4: Report for controlling girder only --
     print("\n[Step 4] Generating report for controlling girder ...")
@@ -3612,6 +3665,9 @@ def run_design_check(
         "per_girder"                : per_girder_results,
         # -- ULS check table (Generate Results): per-girder demand/capacity/UR/status
         KEY_SD_ULS_PER_GIRDER       : _build_uls_per_girder(per_girder_results),
+        # -- PASS/FAIL verdict + remediation advice (logged by PlateGirderBridge)
+        KEY_SD_VERDICT              : girder_verdict,
+        KEY_SD_OVERALL_STATUS       : girder_verdict["status"],
     }
 
     return report_text, engine, design_results

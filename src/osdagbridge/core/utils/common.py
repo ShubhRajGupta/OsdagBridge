@@ -1226,6 +1226,91 @@ DESIGN_CHECK_UNITS = {
 }
 
 # ---------------------------------------------------------------------------
+# Design verdict — per-component PASS / FAIL status and remediation guidance
+#
+# A verdict dict (built by each design module, logged by PlateGirderBridge) is::
+#
+#     {
+#       "component": COMPONENT_GIRDER,       # which part of the bridge
+#       "status"   : STATUS_PASS | STATUS_FAIL,
+#       "max_ur"   : float,                  # worst utilisation ratio seen
+#       "failures" : [ {"member", "check", "name", "clause", "ur", "remedy"} ],
+#     }
+#
+# Only genuine failures are listed: a check in the WARN band
+# (DCR_PASS_THRESHOLD ≤ UR < DCR_FAIL_THRESHOLD) still counts as PASS.
+# ---------------------------------------------------------------------------
+STATUS_PASS = "PASS"
+STATUS_FAIL = "FAIL"
+
+# Component labels — wording matches BridgeLogger.STAGE_MAP stages 5, 6 and 7.
+COMPONENT_GIRDER     = "Girder"
+COMPONENT_DECK       = "Deck slab"
+COMPONENT_TRANSVERSE = "Transverse member"
+
+# output_dict keys carrying each component's verdict
+KEY_SD_VERDICT        = "steeldesign.verdict"
+KEY_SD_OVERALL_STATUS = "steeldesign.verdict.status"
+KEY_DD_VERDICT        = "deckdesign.verdict"
+KEY_DD_OVERALL_STATUS = "deckdesign.verdict.status"
+KEY_TD_VERDICT        = "transverse_member_design.verdict"
+KEY_TD_OVERALL_STATUS = "transverse_member_design.verdict.status"
+KEY_BRIDGE_VERDICT        = "bridge.verdict"
+KEY_BRIDGE_OVERALL_STATUS = "bridge.verdict.status"
+
+# DCREngine category number (1-8) -> check identity key, so the design modules
+# can look up titles / units / remedies without duplicating the category names.
+DESIGN_CHECK_CATEGORY_KEYS = {
+    1: KEY_CHECK_FLEXURE,
+    2: KEY_CHECK_SHEAR,
+    3: KEY_CHECK_INTERACTION,
+    4: KEY_CHECK_LTB,
+    5: KEY_CHECK_SHEAR_LONG_TRANS,
+    6: KEY_CHECK_FATIGUE,
+    7: KEY_CHECK_STRESS,
+    8: KEY_CHECK_DEFLECTION,
+}
+
+# What the user should change to make a failing girder check pass.
+DESIGN_CHECK_REMEDY = {
+    KEY_CHECK_FLEXURE: (
+        "Increase the girder depth D, or the flange area (b_f x t_f): "
+        "M_d grows with the plastic section modulus Z_p."
+    ),
+    KEY_CHECK_SHEAR: (
+        "Increase the web thickness t_w or the girder depth D to enlarge the "
+        "shear area A_v; if shear buckling governs, reduce the intermediate "
+        "stiffener spacing c."
+    ),
+    KEY_CHECK_INTERACTION: (
+        "Relieve whichever term dominates: thicken the web t_w for the shear or "
+        "axial term, or deepen the girder and thicken the flanges for the "
+        "moment term."
+    ),
+    KEY_CHECK_LTB: (
+        "Reduce the cross-bracing spacing so the unrestrained length L_LT drops, "
+        "or widen the compression flange b_f."
+    ),
+    KEY_CHECK_SHEAR_LONG_TRANS: (
+        "Reduce the shear-stud longitudinal spacing, or increase the stud "
+        "diameter / number of studs per section."
+    ),
+    KEY_CHECK_FATIGUE: (
+        "Lower the stress range: increase the section modulus (deeper girder or "
+        "thicker flanges), or improve the fatigue detail category of the "
+        "governing weld."
+    ),
+    KEY_CHECK_STRESS: (
+        "Increase the section modulus Z (deeper girder or thicker flanges) so "
+        "the SLS fibre stresses fall below the limit."
+    ),
+    KEY_CHECK_DEFLECTION: (
+        "Increase the girder depth D or the moment of inertia I_z: deflection "
+        "scales with 1/I."
+    ),
+}
+
+# ---------------------------------------------------------------------------
 # LaTeX equation strings — standalone fragment suitable for embedding inside
 # a \[ ... \] display-math block in a minimal article document.
 #
