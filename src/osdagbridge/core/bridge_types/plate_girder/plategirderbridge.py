@@ -259,8 +259,13 @@ from osdagbridge.core.utils.common import (
     KEY_TD_ED_BOTTOM_CHORD_PROP_RV, KEY_TD_ED_BOTTOM_CHORD_PROP_ZZ, KEY_TD_ED_BOTTOM_CHORD_PROP_ZV, KEY_TD_ED_BOTTOM_CHORD_PROP_ZUZ, KEY_TD_ED_BOTTOM_CHORD_PROP_ZUV,
 
     STATUS_PASS, STATUS_FAIL,
+    COMPONENT_TRANSVERSE, COMPONENT_CROSS_BRACING, COMPONENT_END_DIAPHRAGM,
+    COMPONENT_BRIDGE,
     KEY_SD_VERDICT, KEY_SD_OVERALL_STATUS,
     KEY_DD_VERDICT, KEY_DD_OVERALL_STATUS,
+    KEY_TD_VERDICT, KEY_TD_OVERALL_STATUS,
+    KEY_BRIDGE_VERDICT, KEY_BRIDGE_OVERALL_STATUS,
+    KEY_OSDAG_DESIGN_STATUS, KEY_OSDAG_LOGS, TRANSVERSE_ERROR_REMEDY,
 )
 
 from osdagbridge.core.bridge_types.plate_girder.initial_sizing import (
@@ -323,7 +328,9 @@ def log_design_verdict(verdict: dict) -> None:
 
     On PASS a single green line is written. On FAIL every failing check is
     listed with its member, clause and utilisation ratio, each followed by the
-    remediation advice telling the user what to change to make it pass.
+    remediation advice telling the user what to change to make it pass. A
+    failure's ``remedy`` may be a single string or a list of lines — transverse
+    members quote Osdag's own guidance, which runs to several messages.
 
     ``verdict`` is the dict documented in common.py (see KEY_SD_VERDICT); it is
     built by the design module that ran the checks — designer.build_girder_verdict
@@ -335,13 +342,23 @@ def log_design_verdict(verdict: dict) -> None:
     component = verdict.get("component", "")
     status    = verdict.get("status", STATUS_FAIL)
     max_ur    = verdict.get("max_ur")
-    detail    = f"max UR = {max_ur:.3f}" if isinstance(max_ur, (int, float)) else ""
+    failures  = verdict.get("failures") or []
+    has_ur    = isinstance(max_ur, (int, float))
 
-    bridge_logger.verdict(component, status, detail)
     if status == STATUS_PASS:
+        bridge_logger.verdict(component, status,
+                              f"max UR = {max_ur:.3f}" if has_ur else "")
         return
 
-    for failure in verdict.get("failures") or []:
+    # On FAIL lead with the count: the worst UR can sit below 1.0 when a member
+    # failed for a reason other than utilisation (Osdag finding no section at
+    # all), and "FAIL (max UR = 0.900)" would read as a contradiction.
+    detail = f"{len(failures)} check(s) failed"
+    if has_ur and max_ur >= 1.0:
+        detail += f", max UR = {max_ur:.3f}"
+    bridge_logger.verdict(component, status, detail)
+
+    for failure in failures:
         label = failure.get("name") or failure.get("check", "")
         if failure.get("member"):
             label = f"{failure['member']} : {label}"
@@ -352,8 +369,45 @@ def log_design_verdict(verdict: dict) -> None:
         bridge_logger.check_failed(
             label, f"UR = {ur:.3f}" if isinstance(ur, (int, float)) else ""
         )
-        if failure.get("remedy"):
-            bridge_logger.suggestion(failure["remedy"])
+        remedy = failure.get("remedy") or ""
+        for line in ([remedy] if isinstance(remedy, str) else remedy):
+            if line:
+                bridge_logger.suggestion(line)
+
+
+def merge_verdicts(component: str, verdicts: list) -> dict:
+    """Combine several component verdicts into one.
+
+    FAIL wins over PASS, the failure lists are concatenated worst-UR first, and
+    max_ur is the largest reported. Each failure keeps the name of the verdict it
+    came from, so a merged entry still says which part of the bridge it belongs to.
+
+    Used twice: for the transverse stage (cross bracing plus end diaphragm) and
+    for the whole-bridge roll-up at the end of design().
+    """
+    failures: list = []
+    max_ur = None
+
+    for verdict in verdicts:
+        if not verdict:
+            continue
+        source = verdict.get("component")
+        for failure in verdict.get("failures") or []:
+            failure = dict(failure)
+            if source and source != component:
+                failure["member"] = f"{source} {failure.get('member', '')}".strip()
+            failures.append(failure)
+        ur = verdict.get("max_ur")
+        if isinstance(ur, (int, float)):
+            max_ur = ur if max_ur is None else max(max_ur, ur)
+
+    failures.sort(key=lambda f: (f.get("ur") is not None, f.get("ur") or 0.0), reverse=True)
+    return {
+        "component": component,
+        "status"   : STATUS_FAIL if failures else STATUS_PASS,
+        "max_ur"   : max_ur,
+        "failures" : failures,
+    }
 
 
 class PlateGirderBridge:
@@ -695,11 +749,57 @@ class PlateGirderBridge:
         bridge_logger.sub_step("CAD parameters prepared; geometry is built by the viewer at render time.")
 
     def _stage_transverse_design(self):
+        from osdagbridge.core.bridge_types.plate_girder.crossbracingforces import (
+            build_transverse_verdict,
+        )
+
         self.crossbracing_design_results = self._design_cross_bracing_members()
         self.output_dict["crossbracing_design_results"] = self.crossbracing_design_results
         self.end_diaphragm_design_results = self._design_end_diaphragm_members()
         self.output_dict["end_diaphragm_design_results"] = self.end_diaphragm_design_results
+
+        # Cross bracing and end diaphragm are designed by the same Osdag modules
+        # and share a result shape, so one builder serves both; the two verdicts
+        # merge into the single transverse verdict this stage reports.
+        verdict = merge_verdicts(COMPONENT_TRANSVERSE, [
+            build_transverse_verdict(self.crossbracing_design_results,
+                                     component=COMPONENT_CROSS_BRACING),
+            build_transverse_verdict(self.end_diaphragm_design_results,
+                                     component=COMPONENT_END_DIAPHRAGM),
+        ])
+        self.output_dict[KEY_TD_VERDICT]        = verdict
+        self.output_dict[KEY_TD_OVERALL_STATUS] = verdict["status"]
+        log_design_verdict(verdict)
+
         return self.crossbracing_design_results
+
+    def _log_bridge_verdict(self) -> None:
+        """Log the single PASS/FAIL line covering the whole bridge.
+
+        The girder, deck and transverse verdicts have each already been logged in
+        full by their own stage, so this reports only the outcome and — when it
+        fails — which components are responsible.
+        """
+        verdict = merge_verdicts(COMPONENT_BRIDGE, [
+            self.output_dict.get(KEY_SD_VERDICT),
+            self.output_dict.get(KEY_DD_VERDICT),
+            self.output_dict.get(KEY_TD_VERDICT),
+        ])
+        self.output_dict[KEY_BRIDGE_VERDICT]        = verdict
+        self.output_dict[KEY_BRIDGE_OVERALL_STATUS] = verdict["status"]
+
+        if verdict["status"] == STATUS_PASS:
+            bridge_logger.verdict(COMPONENT_BRIDGE, STATUS_PASS,
+                                  "all design checks satisfied")
+            return
+
+        failing = []
+        for key in (KEY_SD_VERDICT, KEY_DD_VERDICT, KEY_TD_VERDICT):
+            component = self.output_dict.get(key) or {}
+            if component.get("status") == STATUS_FAIL:
+                failing.append(component.get("component", ""))
+        bridge_logger.verdict(COMPONENT_BRIDGE, STATUS_FAIL,
+                              "failing: " + ", ".join(f for f in failing if f))
 
     def design(self) -> None:
         """
@@ -828,6 +928,11 @@ class PlateGirderBridge:
             
             # Stage 8: 3D CAD & Drawing Generation
             self._run_stage("8", self._stage_cad_generation)
+
+            # Whole-bridge roll-up of stages 5-7. Only the headline is logged —
+            # every individual failure was already listed with its advice by the
+            # stage that found it; repeating them here would just be noise.
+            self._log_bridge_verdict()
 
             # Freeze output_dict — no further writes allowed after this point
             self.output_dict = types.MappingProxyType(self.output_dict)
@@ -2841,7 +2946,12 @@ class PlateGirderBridge:
                                 res = future.result()
                             except Exception as exc:
                                 print(f"  [EndDiaphragm] SKIP {p} {member} {force_type}: {exc}")
-                                res = None
+                                # Record the failure rather than dropping it — see the
+                                # matching comment in CrossBracingForces.run_member_designs.
+                                res = {
+                                    KEY_OSDAG_DESIGN_STATUS: False,
+                                    KEY_OSDAG_LOGS: [f"{TRANSVERSE_ERROR_REMEDY} ({exc})"],
+                                }
                             pair_designs.setdefault(p, {}).setdefault(member, {})[force_type] = res
 
                 # Fetch selected designations

@@ -1247,6 +1247,10 @@ STATUS_FAIL = "FAIL"
 COMPONENT_GIRDER     = "Girder"
 COMPONENT_DECK       = "Deck slab"
 COMPONENT_TRANSVERSE = "Transverse member"
+# Sub-components of the transverse stage, and the whole-bridge roll-up.
+COMPONENT_CROSS_BRACING = "Cross bracing"
+COMPONENT_END_DIAPHRAGM = "End diaphragm"
+COMPONENT_BRIDGE        = "Bridge design"
 
 # output_dict keys carrying each component's verdict
 KEY_SD_VERDICT        = "steeldesign.verdict"
@@ -1380,6 +1384,37 @@ DECK_CHECK_REMEDY = {
 DECK_BARS_MAXED_NOTE = (
     "The reinforcement is already at the largest permitted bar and the minimum "
     "spacing, so adding steel is no longer possible."
+)
+
+# ---------------------------------------------------------------------------
+# Transverse members (cross bracing / end diaphragm)
+#
+# These are designed by the Osdag member modules rather than by this codebase,
+# so the verdict is built from what Osdag reports back: a design_status flag and
+# the module's own log messages, which already say what to change (e.g. "Define
+# member(s) with a higher cross sectional area."). Both are attached to every
+# result dict by connect.run_calculation.
+# ---------------------------------------------------------------------------
+KEY_OSDAG_DESIGN_STATUS = "osdag.design_status"
+KEY_OSDAG_LOGS          = "osdag.logs"
+
+KEY_TD_CHECK_DIAGONAL = "transverse.diagonal"
+KEY_TD_CHECK_CHORD    = "transverse.chord"
+
+TRANSVERSE_CHECK_TITLES = {
+    KEY_TD_CHECK_DIAGONAL: "Bracing Diagonal",
+    KEY_TD_CHECK_CHORD:    "Bracing Chord",
+}
+
+# Used only when Osdag returned no guidance of its own.
+TRANSVERSE_REMEDY = (
+    "No section in the Osdag list satisfies this force. Reduce the demand by "
+    "closing up the cross-bracing spacing, or allow larger sections in the "
+    "transverse member inputs."
+)
+TRANSVERSE_ERROR_REMEDY = (
+    "The Osdag member design did not complete. Check the transverse member "
+    "inputs (section list, bolt / plate options, member length) and re-run."
 )
 
 # ---------------------------------------------------------------------------

@@ -143,6 +143,17 @@ from osdagbridge.core.utils.common import (
     KEY_MP_CB_BRACING_SECTION_TYPE,
     KEY_MP_CB_TOP_CHORD,
     KEY_MP_CB_BOTTOM_CHORD,
+    # Verdict — PASS/FAIL summary + remediation advice for the design logger
+    STATUS_PASS,
+    STATUS_FAIL,
+    COMPONENT_TRANSVERSE,
+    KEY_OSDAG_DESIGN_STATUS,
+    KEY_OSDAG_LOGS,
+    KEY_TD_CHECK_DIAGONAL,
+    KEY_TD_CHECK_CHORD,
+    TRANSVERSE_CHECK_TITLES,
+    TRANSVERSE_REMEDY,
+    TRANSVERSE_ERROR_REMEDY,
 )
 
 # ---------------------------------------------------------------------------
@@ -151,6 +162,92 @@ from osdagbridge.core.utils.common import (
 
 BRACE_X = "X"
 BRACE_K = "K"
+
+
+# ===========================================================================
+def build_transverse_verdict(
+    pair_designs: dict,
+    component: str = COMPONENT_TRANSVERSE,
+) -> dict:
+    """Condense the Osdag member designs into a single PASS/FAIL verdict.
+
+    A member design fails when Osdag reports ``design_status = False`` — no
+    section in its list carries the force — or when the design did not complete
+    at all. Osdag explains both cases through its own logger, and those messages
+    (captured by connect.run_calculation) become the advice shown to the user,
+    so the guidance is Osdag's own rather than a paraphrase of it.
+
+    ``pair_designs`` is the nested ``{pair: {member: {force_type: result}}}``
+    dict produced by run_member_designs and by the end-diaphragm design; both
+    share the shape, so this serves either.
+
+    Failures are grouped by member type and force type — every girder pair sees
+    the same brace geometry, so one failing diagonal usually means all of them
+    fail identically. The first failing pair is named and the rest counted.
+
+    Returns a verdict dict as documented in common.py (KEY_TD_VERDICT).
+    """
+    from osdagbridge.core.bridge_types.plate_girder.results_data import (
+        _extract_osdag_summary,
+    )
+
+    worst: dict = {}
+    max_ur = 0.0
+
+    for pair, members in (pair_designs or {}).items():
+        for member, force_types in (members or {}).items():
+            check_key = KEY_TD_CHECK_CHORD if member == "chord" else KEY_TD_CHECK_DIAGONAL
+
+            for force_type, result in (force_types or {}).items():
+                result  = result or {}
+                summary = _extract_osdag_summary(result)
+
+                efficiency = summary.get("efficiency")
+                ur = float(efficiency) if isinstance(efficiency, (int, float)) else None
+                if ur is not None:
+                    max_ur = max(max_ur, ur)
+
+                # design_status is authoritative; fall back to "did Osdag return a
+                # section?" for results produced before it was carried back.
+                status = result.get(KEY_OSDAG_DESIGN_STATUS)
+                ok = bool(status) if status is not None else bool(summary.get("section"))
+                if ok:
+                    continue
+
+                group = (check_key, force_type)
+                if group in worst:
+                    worst[group]["_other_pairs"] += 1
+                    continue
+
+                advice = [m for m in (result.get(KEY_OSDAG_LOGS) or []) if m]
+                if not advice:
+                    advice = [TRANSVERSE_ERROR_REMEDY if not result else TRANSVERSE_REMEDY]
+
+                worst[group] = {
+                    "member": str(pair),
+                    "check" : check_key,
+                    "name"  : f"{TRANSVERSE_CHECK_TITLES.get(check_key, check_key)} ({force_type})",
+                    "clause": "",
+                    "ur"    : round(ur, 3) if ur is not None else None,
+                    "remedy": advice,
+                    "_other_pairs": 0,
+                }
+
+    failures = []
+    for failure in worst.values():
+        others = failure.pop("_other_pairs")
+        if others:
+            failure["member"] = f"{failure['member']} (and {others} other pair(s))"
+        failures.append(failure)
+    # UR is absent whenever Osdag found no section at all, so sort those first.
+    failures.sort(key=lambda f: (f["ur"] is not None, f["ur"] or 0.0), reverse=True)
+
+    return {
+        "component": component,
+        "status"   : STATUS_FAIL if failures else STATUS_PASS,
+        "max_ur"   : round(max_ur, 3) if max_ur else None,
+        "failures" : failures,
+    }
 
 # ===========================================================================
 class CrossBracingForces:
@@ -656,7 +753,13 @@ class CrossBracingForces:
                     result = future.result()
                 except Exception as exc:
                     print(f"  [CrossBracing] SKIP {pair} {member} {force_type}: {exc}")
-                    result = None
+                    # Record the failure rather than dropping it: a None here is
+                    # indistinguishable from "not designed", and the exception text
+                    # is what the verdict reports back to the user.
+                    result = {
+                        KEY_OSDAG_DESIGN_STATUS: False,
+                        KEY_OSDAG_LOGS: [f"{TRANSVERSE_ERROR_REMEDY} ({exc})"],
+                    }
                 results.setdefault(pair, {}).setdefault(member, {})[force_type] = result
 
         print(f"  Total time : {time.perf_counter() - t0:.3f}s  |  {len(jobs)} designs\n{sep}")

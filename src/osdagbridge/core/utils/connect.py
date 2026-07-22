@@ -30,6 +30,8 @@ if sys.platform.startswith("win"):
 
 from osdag_core.cli import _get_output_dictionary
 
+from osdagbridge.core.utils.common import KEY_OSDAG_DESIGN_STATUS, KEY_OSDAG_LOGS
+
 from osdag_core.design_type.compression_member.compression_bolted import Compression_bolted
 from osdag_core.design_type.compression_member.compression_welded import Compression_welded
 from osdag_core.design_type.tension_member.tension_bolted import Tension_bolted
@@ -45,18 +47,73 @@ MODULE_CLASS_MAP = {
 # OUTPUT SUPPRESSION
 @contextlib.contextmanager
 def suppress_output(enabled: bool = True):
+    """Silence the design module's console chatter.
+
+    Only the streams are redirected — logging is deliberately left enabled so
+    _OsdagLogCollector can still capture the module's own log records, which is
+    where Osdag explains why a design failed and what to change. Nothing reaches
+    the user's console regardless: run_calculation only ever runs in a design_pool
+    subprocess, whose root logger has no handlers, and logging's last-resort
+    handler writes to the stderr being redirected here.
+    """
     if not enabled:
         yield
         return
-
-    logging.disable(logging.CRITICAL)
 
     with open(os.devnull, "w", encoding="utf-8") as devnull:
         with contextlib.redirect_stdout(devnull):
             with contextlib.redirect_stderr(devnull):
                 yield
 
-    logging.disable(logging.NOTSET)
+
+# Trailing separator Osdag logs after every run — carries no information.
+_OSDAG_LOG_END_MARKER = "End Of design"
+# Cap on messages carried back per design, so a chatty module cannot bloat the
+# result that is pickled across the process boundary.
+_OSDAG_LOG_MAX = 12
+
+
+class _OsdagLogCollector(logging.Handler):
+    """Collect a design module's log records instead of printing them.
+
+    Osdag reports the reason a member design failed and the remedy through its
+    own logger ("The factored tension force ... exceeds the tension capacity ...",
+    "Define member(s) with a higher cross sectional area."). Those records are
+    the guidance surfaced to the user, so they are collected here and returned
+    with the result rather than discarded.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            # Osdag prefixes its messages with ':' via its custom logger.
+            text = record.getMessage().strip().lstrip(":").strip()
+        except Exception:
+            return
+        if not text or _OSDAG_LOG_END_MARKER in text:
+            return
+        if text not in self.messages and len(self.messages) < _OSDAG_LOG_MAX:
+            self.messages.append(text)
+
+
+def _attach_log_collector(module_instance) -> _OsdagLogCollector:
+    """Swap the module's console/file handlers for an in-memory collector."""
+    collector = _OsdagLogCollector()
+    logger = getattr(module_instance, "logger", None)
+    if logger is None:
+        return collector
+    for handler in logger.handlers:
+        try:
+            handler.close()
+        except Exception:
+            pass
+    logger.handlers = [collector]
+    logger.propagate = False        # keep the records off the root logger
+    return collector
+
 
 def run_calculation(design_dict: Dict[str, Any], quiet: bool = True) -> Dict[str, Any]:
     # Every subprocess needs UTF-8 again
@@ -73,6 +130,7 @@ def run_calculation(design_dict: Dict[str, Any], quiet: bool = True) -> Dict[str
 
         module_instance = module_class()
         module_instance.set_osdaglogger(None, None)
+        collector = _attach_log_collector(module_instance)
 
         validation_errors = module_instance.func_for_validation(design_dict)
 
@@ -81,6 +139,11 @@ def run_calculation(design_dict: Dict[str, Any], quiet: bool = True) -> Dict[str
             raise RuntimeError("Validation errors occurred during execution.")
 
         output_dict = _get_output_dictionary(module_instance)
+
+        # Carry the pass/fail flag and Osdag's own guidance back to the parent
+        # process — the design values alone do not say whether the design worked.
+        output_dict[KEY_OSDAG_DESIGN_STATUS] = bool(module_instance.design_status)
+        output_dict[KEY_OSDAG_LOGS] = collector.messages
 
         return output_dict
 
